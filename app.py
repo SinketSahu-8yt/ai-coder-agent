@@ -1,162 +1,118 @@
 import os
 import requests
 import re
-import json
+import uuid
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
 app = Flask(__name__)
-CORS(app) 
+# Allow all origins for mobile/web compatibility
+CORS(app, resources={r"/*": {"origins": "*"}})
 
-# --- CONFIGURATION ---
 API_URL = "https://api.perplexity.ai/chat/completions"
 
-# --- LEGEND LEVEL ALGORITHM: THE ARCHITECT BRAIN ---
-class AgentBrain:
-    def __init__(self):
-        self.system_persona = """
-        YOU ARE 'CODER-X', A LEGENDARY SOFTWARE ARCHITECT AND SENIOR DEVELOPER.
-        
-        YOUR CORE ALGORITHM (STRICTLY FOLLOW THIS FLOW):
-        1. **DECONSTRUCTION**: Break down the user's request into technical components.
-        2. **MEMORY CHECK**: Look at previous tasks/files.
-        3. **STRATEGY**:
-           - If coding: Plan the file structure first.
-           - If debugging: Analyze the error trace step-by-step.
-        4. **EXECUTION**: Write clean, modern, and optimized code.
-        5. **SELF-CORRECTION**: Before answering, mentally review your code for bugs.
-        
-        OUTPUT FORMAT RULES:
-        - USE <PLAN> tags to show your thinking process (optional but recommended for complex tasks).
-        - ALWAYS wrap code in ```language ... ``` blocks.
-        - EXPLAIN logic in HINGLISH (Hindi + English Mix).
-        - ADD comments in the code explaining complex parts.
-        
-        TOOLS SYNTAX:
-        - To add to-do list: [[ADD_TODO: task]]
-        - To complete task: [[DEL_TODO: task]]
-        """
-
-    def construct_messages(self, user_msg, history, todos, file_context):
-        """
-        Yeh function dynamic prompt engineering use karta hai.
-        Har request ke saath context ko smart tarike se inject karta hai.
-        """
-        
-        # 1. Context Injection
-        context_block = ""
-        if file_context:
-            context_block = f"\n\n[CURRENT FILE CONTEXT]:\n```\n{file_content}\n```"
-        
-        todo_block = "\n".join([f"[ ] {t}" for t in todos])
-        if todo_block:
-            todo_block = f"\n\n[ACTIVE TASKS]:\n{todo_block}"
-
-        # 2. Advanced Prompt Wrapping (Meta-Prompting)
-        # Yeh AI ko force karta hai ki wo seedha code na pheke, pehle samjhe.
-        final_user_prompt = f"""
-        User Request: "{user_msg}"
-        
-        {context_block}
-        {todo_block}
-        
-        INSTRUCTIONS FOR AI:
-        - Analyze the request deeply.
-        - If the user wants a full app, give separate code blocks for each file (HTML, CSS, JS, PY).
-        - Detect potential errors in user logic if any.
-        - Start working now.
-        """
-
-        messages = [{"role": "system", "content": self.system_persona}]
-        
-        # Add limited history (Last 8 turns to save tokens but keep context)
-        messages.extend(history[-8:]) 
-        
-        # Append the new optimized prompt
-        messages.append({"role": "user", "content": final_user_prompt})
-        
-        return messages
-
-# Initialize the Brain
-brain = AgentBrain()
+# --- IN-MEMORY DATABASE (Session based) ---
+# Format: {'session_id': ['Task 1', 'Task 2']}
 user_sessions = {}
+
+SYSTEM_PROMPT = """
+YOU ARE A LEGENDARY AI ARCHITECT (AGENT CODING MODE).
+
+YOUR GOAL: Plan, Code, and Track progress.
+
+**CRITICAL RULES FOR TO-DO MANAGEMENT:**
+1. You have access to a To-Do list.
+2. To ADD a task, strictly use this format: [[ADD_TODO: Install Flask]]
+3. To MARK DONE/REMOVE a task, use: [[DEL_TODO: Install Flask]]
+4. When starting a big project, first ADD tasks for the plan.
+5. After coding a part, DEL the completed task.
+
+**CODING RULES:**
+- Write production-ready code.
+- Explain briefly in Hinglish.
+- Use Markdown for code blocks.
+"""
 
 @app.route('/chat', methods=['POST'])
 def chat():
-    data = request.json
-    
-    # Extract Data
-    user_message = data.get('message')
-    api_key = data.get('api_key')
-    model = data.get('model', 'llama-3.1-sonar-large-128k-online')
-    file_content = data.get('file_content', '')
-    session_id = data.get('session_id', 'default')
-
-    if not api_key:
-        return jsonify({"error": "Bhai API Key toh daal! Settings check kar."})
-
-    # Session Management
-    if session_id not in user_sessions:
-        user_sessions[session_id] = {"history": [], "todos": []}
-    
-    session = user_sessions[session_id]
-
-    # --- THE ALGORITHM ACTION ---
-    # 1. Construct the smart prompt
-    messages = brain.construct_messages(
-        user_message, 
-        session["history"], 
-        session["todos"], 
-        file_content
-    )
-
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
-    
-    # 2. Parameters for Coding (Low Temperature = High Precision)
-    payload = {
-        "model": model,
-        "messages": messages,
-        "temperature": 0.15, # Very precise for coding
-        "top_p": 0.9
-    }
-
     try:
-        response = requests.post(API_URL, json=payload, headers=headers)
+        data = request.json
+        api_key = data.get('api_key')
+        user_message = data.get('message')
+        model = data.get('model', 'sonar-pro')
+        file_content = data.get('file_content', '')
+        session_id = data.get('session_id') # Frontend se aayega unique ID
+
+        if not api_key:
+            return jsonify({"error": "Guru, API Key toh daalo!"}), 400
+
+        # 1. Session Management
+        if not session_id:
+            session_id = "default"
         
+        if session_id not in user_sessions:
+            user_sessions[session_id] = []
+        
+        current_todos = user_sessions[session_id]
+
+        # 2. Context Injection (Inject To-Do List into AI's brain)
+        todo_context = "NO ACTIVE TASKS."
+        if current_todos:
+            todo_context = "CURRENT TO-DO LIST:\n" + "\n".join([f"- {t}" for t in current_todos])
+
+        final_prompt = f"""
+        {todo_context}
+
+        USER REQUEST: "{user_message}"
+        
+        CONTEXT FILE: {file_content[:2000] if file_content else "None"}
+        """
+
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": final_prompt}
+        ]
+
+        # 3. Call Perplexity
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        payload = {"model": model, "messages": messages, "temperature": 0.1}
+
+        response = requests.post(API_URL, json=payload, headers=headers)
         if response.status_code != 200:
-            return jsonify({"error": f"Perplexity API Error: {response.text}"})
+            return jsonify({"error": f"API Error: {response.text}"})
 
-        res_json = response.json()
-        ai_reply = res_json['choices'][0]['message']['content']
+        ai_reply = response.json()['choices'][0]['message']['content']
 
-        # 3. Post-Processing (Tool Extraction)
-        # AI agar response mein tools use kare to unhe pakadna
+        # 4. PARSING LOGIC (The Magic)
+        # Extract ADD commands
         adds = re.findall(r'\[\[ADD_TODO: (.*?)\]\]', ai_reply)
-        dels = re.findall(r'\[\[DEL_TODO: (.*?)\]\]', ai_reply)
-
         for item in adds:
-            if item not in session["todos"]: session["todos"].append(item)
+            if item not in current_todos:
+                current_todos.append(item)
+        
+        # Extract DEL commands
+        dels = re.findall(r'\[\[DEL_TODO: (.*?)\]\]', ai_reply)
         for item in dels:
-            if item in session["todos"]: session["todos"].remove(item)
+            # Flexible matching (case insensitive strip)
+            clean_dels = [t for t in current_todos if item.lower() in t.lower()]
+            for t in clean_dels:
+                if t in current_todos:
+                    current_todos.remove(t)
 
-        # Cleanup internal tags for cleaner UI (optional)
-        clean_reply = re.sub(r'\[\[.*?\]\]', '', ai_reply)
+        # Update Session
+        user_sessions[session_id] = current_todos
 
-        # 4. Save to Memory (Raw User Input, not the massive prompt)
-        session["history"].append({"role": "user", "content": user_message})
-        session["history"].append({"role": "assistant", "content": ai_reply})
+        # Cleanup output for user (Hidden tags remove kar do)
+        display_reply = re.sub(r'\[\[.*?\]\]', '', ai_reply)
 
         return jsonify({
-            "reply": clean_reply,
-            "todos": session["todos"]
+            "reply": display_reply,
+            "todos": current_todos # Updated list bhej rahe hain frontend ko
         })
 
     except Exception as e:
-        print(f"Server Error: {e}")
-        return jsonify({"error": "Server pe kuch fat gaya bhai: " + str(e)})
+        return jsonify({"error": str(e)})
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
